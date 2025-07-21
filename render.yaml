@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: your-app-name
-    env: python
-    build:
-      pythonVersion: 3.10
