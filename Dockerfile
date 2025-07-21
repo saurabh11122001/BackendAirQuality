@@ -15,4 +15,5 @@ RUN pip install -r requirements.txt
 EXPOSE 5000
 
 # Start the Flask app (edit if your app runs differently)
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+
