@@ -7,11 +7,19 @@ from flask_cors import CORS
 from tensorflow.keras.models import load_model
 import pandas as pd
 
+# Disable GPU for CPU inference
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, supports_credentials=True, resources={
+    r"/*": {
+        "origins": [
+            "http://localhost:8080",
+            "https://airqualitycities.iiti.ac.in"
+        ]
+    }
+})
 
 api_key = "701cf10ad3df9b6f5f58f40bfba7e837"
 
@@ -79,7 +87,7 @@ for pollutant in TARGET_POLLUTANTS:
         path = os.path.join(os.path.dirname(__file__), f"best_cnn_{pollutant}.keras")
         models[pollutant] = load_model(path)
     except Exception as e:
-        print(f"Model load error for {pollutant}: {e}")
+        print(f"Model load error for {pollutant}: {e}", flush=True)
         models[pollutant] = None
 
 def get_city_coordinates(city_name):
@@ -94,29 +102,44 @@ def get_city_coordinates(city_name):
             if lat is not None and lon is not None:
                 return lat, lon
     except Exception as e:
-        print("Error in get_city_coordinates:", e)
-    return None, None
-
-    try:
-        url = f"http://api.openweathermap.org/geo/1.0/direct?q={city_name}&limit=1&appid={api_key}"
-        res = requests.get(url)
-        data = res.json()
-        if data:
-            return data[0]['lat'], data[0]['lon']
-    except: pass
+        print("Error in get_city_coordinates:", e, flush=True)
     return None, None
 
 def fetch_pollutant_series(lat, lon, pollutant):
     try:
-        end_date = datetime.utcnow().date() - timedelta(days=1)
-        start_date = end_date - timedelta(days=4)
+        # Get the current UTC time and subtract 1 hour to ensure the latest full hour
+        end_datetime = datetime.utcnow().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        start_datetime = end_datetime - timedelta(hours=71)
+
+        start_date = start_datetime.date().strftime("%Y-%m-%d")
+        end_date = end_datetime.date().strftime("%Y-%m-%d")
+
         api_field = POLLUTANT_API_MAP[pollutant]
-        url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&hourly={api_field}"
+
+        url = (
+            f"https://air-quality-api.open-meteo.com/v1/air-quality"
+            f"?latitude={lat}&longitude={lon}"
+            f"&start_date={start_date}&end_date={end_date}"
+            f"&hourly={api_field}&timezone=UTC"
+        )
+
         response = requests.get(url)
         data = response.json()
-        return data["hourly"].get(api_field, [])[-72:]
-    except:
+
+        values = data["hourly"].get(api_field, [])
+        time_stamps = data["hourly"].get("time", [])
+
+        # Trim the data to get exactly last 72 valid entries ending at end_datetime
+        valid_values = [
+            val for ts, val in zip(time_stamps, values)
+            if datetime.strptime(ts, "%Y-%m-%dT%H:%M") <= end_datetime
+        ]
+
+        return valid_values[-72:]  # Return only last 72
+    except Exception as e:
+        print(f"[{pollutant.upper()}] Pollutant fetch error:", e, flush=True)
         return []
+
 
 def fetch_weather_series(lat, lon):
     try:
@@ -141,6 +164,7 @@ def predict_pollutant(pollutant, data, weather_data):
 
         weather_features = weather_data[-1][:9] if weather_data else [0] * 9
         seq = [0.0] + data[-72:] + weather_features
+
         if len(seq) != 82: return []
 
         sequence = np.array(seq).reshape((1, 82, 1))
@@ -166,7 +190,7 @@ def predict_pollutant(pollutant, data, weather_data):
 
         return results
     except Exception as e:
-        print(f"Prediction error for {pollutant}: {e}")
+        print(f"Prediction error for {pollutant}: {e}", flush=True)
         return []
 
 @app.route('/predict', methods=['POST'])
@@ -194,11 +218,9 @@ def predict():
                 today_data["pollutant"] = pollutant
                 today_pollutants.append(today_data)
 
-        # Overall daily AQI
         overall_daily_aqi = []
         for i in range(7):
             daily_values = []
-
             for p in TARGET_POLLUTANTS:
                 pollutant_data = result.get(p, [])
                 if len(pollutant_data) > i:
@@ -234,11 +256,14 @@ def predict():
         })
 
     except Exception as e:
-        print(f"Error in /predict: {e}")
+        print(f"Error in /predict: {e}", flush=True)
         return jsonify({"error": "Internal Server Error"}), 500
 
-@app.route('/weather', methods=['POST'])
+@app.route('/weather', methods=['POST', 'OPTIONS'])
 def weather_forecast():
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "OK"}), 200  # Preflight support
+
     try:
         city_name = request.json.get("city")
         if not city_name:
@@ -248,12 +273,10 @@ def weather_forecast():
         if not lat or not lon:
             return jsonify({"error": "City not found"}), 404
 
-        # Prepare date range: today + next 3 days
         today = datetime.utcnow().date()
         start_date = today.strftime("%Y-%m-%d")
         end_date = (today + timedelta(days=3)).strftime("%Y-%m-%d")
 
-        # Open-Meteo API call
         url = (
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
@@ -269,13 +292,7 @@ def weather_forecast():
         for i in range(len(daily.get("time", []))):
             date_str = daily["time"][i]
             date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-            if i == 0:
-                day = "Today"
-            elif i == 1:
-                day = "Tomorrow"
-            else:
-                day = date_obj.strftime("%A")  # Monday, Tuesday, etc.
-
+            day = "Today" if i == 0 else "Tomorrow" if i == 1 else date_obj.strftime("%A")
             forecast.append({
                 "date": date_str,
                 "day": day,
@@ -291,9 +308,10 @@ def weather_forecast():
         })
 
     except Exception as e:
-        print(f"Error in /weather-forecast: {e}")
+        print(f"Error in /weather: {e}", flush=True)
         return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
+    print("🚀 Flask server is starting...", flush=True)
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
