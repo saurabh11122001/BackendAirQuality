@@ -6,6 +6,9 @@ from datetime import datetime, timedelta
 from flask_cors import CORS
 from tensorflow.keras.models import load_model
 import pandas as pd
+from zoneinfo import ZoneInfo   
+IST = ZoneInfo("Asia/Kolkata")
+
 
 # Disable GPU for CPU inference
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -107,12 +110,12 @@ def get_city_coordinates(city_name):
 
 def fetch_pollutant_series(lat, lon, pollutant):
     try:
-        # Get the current UTC time and subtract 1 hour to ensure the latest full hour
-        end_datetime = datetime.utcnow().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-        start_datetime = end_datetime - timedelta(hours=71)
+        # Get current IST datetime rounded to last full hour
+        end_datetime_ist = datetime.now(IST).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        start_datetime = end_datetime_ist - timedelta(hours=71)
 
         start_date = start_datetime.date().strftime("%Y-%m-%d")
-        end_date = end_datetime.date().strftime("%Y-%m-%d")
+        end_date = end_datetime_ist.date().strftime("%Y-%m-%d")
 
         api_field = POLLUTANT_API_MAP[pollutant]
 
@@ -120,7 +123,7 @@ def fetch_pollutant_series(lat, lon, pollutant):
             f"https://air-quality-api.open-meteo.com/v1/air-quality"
             f"?latitude={lat}&longitude={lon}"
             f"&start_date={start_date}&end_date={end_date}"
-            f"&hourly={api_field}&timezone=UTC"
+            f"&hourly={api_field}&timezone=Asia%2FKolkata"
         )
 
         response = requests.get(url)
@@ -129,13 +132,13 @@ def fetch_pollutant_series(lat, lon, pollutant):
         values = data["hourly"].get(api_field, [])
         time_stamps = data["hourly"].get("time", [])
 
-        # Trim the data to get exactly last 72 valid entries ending at end_datetime
-        valid_values = [
-            val for ts, val in zip(time_stamps, values)
-            if datetime.strptime(ts, "%Y-%m-%dT%H:%M") <= end_datetime
-        ]
+        valid_values = []
+        for ts, val in zip(time_stamps, values):
+            ts_dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M").replace(tzinfo=IST)
+            if ts_dt <= end_datetime_ist:
+                valid_values.append(val)
 
-        return valid_values[-72:]  # Return only last 72
+        return valid_values[-72:]
     except Exception as e:
         print(f"[{pollutant.upper()}] Pollutant fetch error:", e, flush=True)
         return []
