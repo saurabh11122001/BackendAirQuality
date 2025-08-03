@@ -211,11 +211,30 @@ def predict():
         result = {}
         today_pollutants = []
 
+        # Predict all pollutants first
         for pollutant in TARGET_POLLUTANTS:
             pol_data = fetch_pollutant_series(lat, lon, pollutant)
             prediction = predict_pollutant(pollutant, pol_data, weather_data)
             result[pollutant] = prediction
 
+        # Adjust pm10 values by adding pm2_5 values
+        pm10_preds = result.get("pm10", [])
+        pm25_preds = result.get("pm2_5", [])
+
+        if pm10_preds and pm25_preds:
+            for i in range(min(len(pm10_preds), len(pm25_preds))):
+                combined_value = pm10_preds[i]["value"] + pm25_preds[i]["value"]
+                pm10_preds[i]["value"] = round(combined_value, 2)
+                new_aqi = get_aqi_sub_index(combined_value, "pm10")
+                pm10_preds[i]["aqi"] = int(new_aqi) if not pd.isna(new_aqi) else 0
+                category, warning, color = get_category_info(pm10_preds[i]["aqi"])
+                pm10_preds[i]["category"] = category
+                pm10_preds[i]["warning"] = warning
+                pm10_preds[i]["color"] = color
+
+        # Prepare today's pollutants list with updated pm10
+        for pollutant in TARGET_POLLUTANTS:
+            prediction = result.get(pollutant, [])
             if prediction:
                 today_data = prediction[0]
                 today_data["pollutant"] = pollutant
